@@ -53,20 +53,25 @@ Config block / `.env` at the top of the script:
 | `IMMICH_API_KEY` | Sent as `x-api-key` header | — |
 | `HOME_CITIES` | City names that count as home (case-insensitive). Primary home rule | `["Paris"]` |
 | `HOME_STATES` | Optional broader home match (state/region) | `["Île-de-France"]` |
+| `HOME_COUNTRIES` | Optional guard against same-named foreign cities (e.g. `Paris, Texas`). When set, a name match counts as home **only if** the asset's `country` is in this list **or** the asset has no country | `["France"]` |
 | `HOME_LAT` / `HOME_LON` | Optional home coordinates. Used **only** to classify *coordinates-only* assets (GPS present, no geocoded city). Leave unset to disable | `48.8566` / `2.3522` |
 | `HOME_RADIUS_KM` | Radius around `HOME_LAT/LON` counted as home (only if home coords set) | `25` |
-| `GAP_MIN_DAYS` | Below this, adjacent clusters are *always merged* | `1.5` |
-| `GAP_MAX_DAYS` | Above this, adjacent clusters are *always split* | `6` |
+| `GAP_MIN_DAYS` | A gap `≥` this (or any country change) opens a boundary; below it, same-country assets always merge | `1.5` |
+| `GAP_MAX_DAYS` | A gap `≥` this is **always** a hard split, regardless of country | `6` |
 | `TRIP_GAP_FALLBACK_DAYS` | Split point used **only** as the deterministic fallback for an *ambiguous* boundary (no LLM / invalid verdict). Must satisfy `GAP_MIN_DAYS ≤ TRIP_GAP_FALLBACK_DAYS ≤ GAP_MAX_DAYS` | `4` |
 | `OUTLIER_MAX_ASSETS` | A cluster with `≤` this many assets at a boundary is an "outlier" trigger | `2` |
 | `REVIEW_TAG` | Tag applied to no-location assets | `needs-location-review` |
 | `ALBUM_PREFIX` | Namespacing prefix for trip albums | `Trip — ` |
 | `ANTHROPIC_API_KEY` | Optional; enables the LLM layer | — |
 
-**Threshold roles (authoritative).** `GAP_MIN_DAYS` / `GAP_MAX_DAYS` bound the
-deterministic first pass: only gaps strictly inside that band are ever ambiguous.
+**Threshold roles (authoritative).** A boundary exists (§6 step 1) when
+`gap_days ≥ GAP_MIN_DAYS` **or** the country changes. A boundary is a **hard
+split** when `gap_days ≥ GAP_MAX_DAYS` (always, regardless of country); otherwise
+it is **soft** and escalated. So the *ambiguous* (soft) set is every boundary with
+`GAP_MIN_DAYS ≤ gap_days < GAP_MAX_DAYS`, **plus** any country-change boundary with
+`gap_days < GAP_MAX_DAYS` (including small-gap hops below `GAP_MIN_DAYS`).
 `TRIP_GAP_FALLBACK_DAYS` is **not** a first-pass threshold — it is consulted only
-when an ambiguous boundary cannot be resolved by the LLM, where gap `≥
+when a soft boundary cannot be resolved by the LLM, where `gap_days ≥
 TRIP_GAP_FALLBACK_DAYS` → split, else merge.
 
 CLI flags: `--apply` (perform writes; default is dry-run), `--no-llm` (force
@@ -110,7 +115,12 @@ For each asset, evaluated in order:
 1. **No location** — no `city`/`state` **and** no `lat/lon` → queue for the
    `REVIEW_TAG`, exclude from albums.
 2. **Home (by name)** — `city` matches `HOME_CITIES` **or** `state` matches
-   `HOME_STATES` (case-insensitive) → ignore.
+   `HOME_STATES` (case-insensitive) → ignore. **Country guard:** if
+   `HOME_COUNTRIES` is configured and the asset has a non-`None` `country`, the
+   name match counts as home only when that `country` is in `HOME_COUNTRIES`
+   (so `Paris, Texas` is *not* treated as home for a Paris, France resident). If
+   `HOME_COUNTRIES` is unset, or the asset has no country, the name match alone
+   decides (prior behavior).
 3. **Coordinates-only** — has `lat/lon` but **no** `city`/`state` (a common Immich
    geocoding gap). Handled by the optional home-GPS check:
    - If `HOME_LAT/HOME_LON` are configured: haversine distance to home ≤
@@ -148,13 +158,16 @@ middle band" wording left middle-band gaps with no boundary to escalate).
    boundaries, each of which is then classified exactly once below.
 2. **Classify each provisional boundary** (this step only *classifies* boundaries
    placed in step 1 — it never creates new ones):
-   - **Hard split** (no escalation) — `gap_days ≥ GAP_MAX_DAYS` **and** country is
-     unchanged/`None`. Distinct trips beyond doubt.
-   - **Soft boundary → escalate** — everything else. By construction this is
-     exactly two cases:
-     - **Middle-band gap** — `GAP_MIN_DAYS ≤ gap_days < GAP_MAX_DAYS`;
-     - **Country change** — a country hop, *including* one with a small gap (it
-       became a boundary in step 1, so it is reviewed rather than force-merged).
+   - **Hard split** (no escalation) — `gap_days ≥ GAP_MAX_DAYS`, **regardless of
+     country**. A gap this large is decisive on its own, and a country change only
+     reinforces it; this honors the config guarantee that `≥ GAP_MAX_DAYS` always
+     splits.
+   - **Soft boundary → escalate** — every boundary with `gap_days < GAP_MAX_DAYS`.
+     By construction (step 1) this is exactly:
+     - **Middle-band gap** — `GAP_MIN_DAYS ≤ gap_days < GAP_MAX_DAYS`; and/or
+     - **Country change** — a country hop with `gap_days < GAP_MAX_DAYS`,
+       *including* one with a small gap below `GAP_MIN_DAYS` (it became a boundary
+       in step 1, so it is reviewed rather than force-merged).
 
    **Sparse outlier is an annotation, not a trigger.** For each soft boundary, if
    either adjacent cluster has `≤ OUTLIER_MAX_ASSETS` assets (default `2`), set an
@@ -173,9 +186,10 @@ middle band" wording left middle-band gaps with no boundary to escalate).
 3. **Batch escalate `resolve_boundary`.** Pack all soft boundaries into one (or a
    few) Claude API call(s). Each boundary payload:
    `{ left: {cities, dates, count}, right: {cities, dates, count}, gap_days,
-   approx_distance_km, cause: "middle_band" | "country_change", outlier: bool }`.
-   (`cause` is which step-1 rule placed the boundary; `outlier` is the annotation
-   from step 2.) Response per boundary:
+   approx_distance_km, cause: "middle_band" | "country_change" | "both",
+   outlier: bool }`. (`cause` is which step-1 rule(s) placed the boundary —
+   `"both"` when a middle-band gap *and* a country change coincide; `outlier` is
+   the annotation from step 2.) Response per boundary:
    `{ decision: "merge" | "split", reason }`. Schema-invalid or no key →
    fallback to the `TRIP_GAP_FALLBACK_DAYS` rule (`gap_days ≥` → split, else
    merge; note this defaults small-gap country hops to *merge* unless the LLM
@@ -205,10 +219,18 @@ escalate(kind, payload, response_schema, fallback_fn) -> verdict
 
 Responsibilities: prompt assembly, Claude API call, schema validation, caching,
 audit logging, and fallback on any failure. The caller supplies an explicit
-**cache key** so identity is decoupled from mutable content:
-- `resolve_boundary` keys on the boundary's stable endpoints (the two clusters'
-  earliest-asset ids), **not** on counts — so adding photos doesn't re-adjudicate.
-- `name_trip` keys on `trip_key` (§7).
+**cache key** chosen to reuse a verdict exactly when it is still valid:
+- `resolve_boundary` keys on the **decision-relevant facts** of the boundary —
+  bucketed `gap_days`, both `country` values, `cause`, the `outlier` flag, and a
+  bucketed `approx_distance_km` — **not** on raw `count` and **not** on the
+  earliest-asset ids alone. Rationale: keying on ids alone (an earlier idea) would
+  freeze a stale verdict when new photos materially change the gap/countries/
+  distance; keying on the facts means a boundary is re-adjudicated only when the
+  inputs that drove the decision actually change, and adding photos *inside* a
+  trip (which doesn't move the boundary facts) still hits the cache. Bucketing
+  keeps trivial jitter (a few hours, a few km) from forcing re-adjudication.
+- `name_trip` keys on `trip_key` (§7) — titles are display-only and must stay
+  stable as a trip grows, so identity (not facts) is the right key there.
 
 Two call sites: `resolve_boundary` and `name_trip`. With no key or `--no-llm`,
 every call routes straight to `fallback_fn`, so the pipeline behaves as a pure
@@ -272,18 +294,24 @@ verdict, reason, and whether the verdict or the fallback was applied. This answe
 ## 12. Testing
 
 - **Pure functions** → unit-tested with fixture assets, no network/LLM:
-  - classification, incl. the four branches and the home-GPS radius edge (coords
-    inside radius = home, outside = away, no-home-coords = review);
+  - classification, incl. the four branches, the home-GPS radius edge (coords
+    inside radius = home, outside = away, no-home-coords = review), and the
+    `HOME_COUNTRIES` guard (same-named foreign city like `Paris, Texas` is **not**
+    home; unset guard or `None` country falls back to name-only);
   - provisional-cut pass (cut at `≥ GAP_MIN` **or** country change; sub-`GAP_MIN`
     same-country stays merged);
-  - boundary classification (hard-split vs soft/escalate), incl. a small-gap
-    country hop landing in the escalate set, and that a sub-`GAP_MIN` same-country
-    single shot creates **no** boundary (outlier is annotation only, never a cut);
+  - boundary classification (hard-split vs soft/escalate), incl.: a small-gap
+    country hop landing in the escalate set; a `gap ≥ GAP_MAX` country-change
+    boundary classified as a **hard split** (never soft); and a sub-`GAP_MIN`
+    same-country single shot creating **no** boundary (outlier is annotation only);
   - haversine/centroid distance, incl. `null` when coords absent;
   - fallback naming and `trip_key` derivation.
 - **`escalate`** → injected fake adjudicator. Assert: a valid verdict is adopted;
   an invalid verdict triggers the fallback; a repeated cache key does not
-  re-invoke the adjudicator; `--no-llm` always routes to fallback.
+  re-invoke the adjudicator; `--no-llm` always routes to fallback. Plus
+  `resolve_boundary` cache-key behavior: adding photos *inside* a trip (boundary
+  facts unchanged) hits the cache, while a change to gap-bucket/country/distance
+  re-adjudicates.
 - **Idempotency** → given recorded album/tag responses, assert: marker parsing
   finds the right album by `trip_key`; a changed title triggers `PATCH` (not a new
   album); growing a trip re-uses the album; the re-clustering/earlier-import edge
