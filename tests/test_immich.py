@@ -104,8 +104,3 @@ def test_add_assets_puts_ids():
     assert sess.calls[0]["json"]["ids"] == ["a3"]
 
 
-def test_tag_assets_bulk_endpoint():
-    c, sess = client([FakeResponse(200, [])])
-    c.tag_assets(["tag1"], ["a1", "a2"])
-    assert sess.calls[0]["url"].endswith("/api/tags/assets")
-    assert sess.calls[0]["json"] == {"tagIds": ["tag1"], "assetIds": ["a1", "a2"]}

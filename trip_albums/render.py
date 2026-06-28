@@ -7,14 +7,24 @@ def _fmt_date(dt):
 
 def render_plan(plan):
     lines = []
-    lines.append(f"Trips ({len(plan.trips)})  |  home photos skipped: {plan.home_count}  "
-                 f"|  to review (tagged): {len(plan.review_asset_ids)}")
+    summary = (f"Trips ({len(plan.trips)})  |  home photos skipped: {plan.home_count}")
+    if plan.skip_count:
+        summary += f"  |  no-location photos skipped: {plan.skip_count}"
+    if plan.review_count:
+        summary += f"  |  no-location photos near a trip: {plan.review_count}"
+    lines.append(summary)
     lines.append("")
 
     for t in plan.trips:
-        src = {"llm": "LLM", "cache": "LLM(cached)", "fallback": "auto"}.get(t.title_source, t.title_source)
-        lines.append(f"  • {t.title}  [{src}]")
+        lines.append(f"  • {t.title}")
         lines.append(f"      {_fmt_date(t.start)} → {_fmt_date(t.end)}   ({len(t.assets)} items)")
+
+    if plan.existing_trips:
+        lines.append("")
+        lines.append(f"Already albumed ({len(plan.existing_trips)}, skipped):")
+        for t in plan.existing_trips:
+            lines.append(f"  • {t.title}")
+            lines.append(f"      {_fmt_date(t.start)} → {_fmt_date(t.end)}   ({len(t.assets)} items)")
 
     if plan.decisions:
         lines.append("")

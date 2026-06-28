@@ -22,10 +22,7 @@ class Config:
     gap_max_days: float
     trip_gap_fallback_days: float
     outlier_max_assets: int
-    review_tag: str
     album_prefix: str
-    anthropic_api_key: Optional[str]
-    llm_enabled: bool
 
     @property
     def has_home_coords(self):
@@ -57,7 +54,7 @@ def _int(env, key, default):
         raise ConfigError(f"{key} must be an integer, got {raw!r}") from exc
 
 
-def load_config(env, no_llm=False):
+def load_config(env):
     """Build a validated Config from an env-like mapping (os.environ or .env merge)."""
     url = (env.get("IMMICH_URL") or "").strip().rstrip("/")
     if not url:
@@ -80,8 +77,6 @@ def load_config(env, no_llm=False):
             f"(got {gap_min}, {fallback}, {gap_max})"
         )
 
-    anthropic_key = (env.get("ANTHROPIC_API_KEY") or "").strip() or None
-
     return Config(
         immich_url=url,
         immich_api_key=api_key,
@@ -95,8 +90,5 @@ def load_config(env, no_llm=False):
         gap_max_days=gap_max,
         trip_gap_fallback_days=fallback,
         outlier_max_assets=_int(env, "OUTLIER_MAX_ASSETS", 2),
-        review_tag=(env.get("REVIEW_TAG") or "needs-location-review").strip(),
         album_prefix=env.get("ALBUM_PREFIX", "Trip — "),
-        anthropic_api_key=anthropic_key,
-        llm_enabled=bool(anthropic_key) and not no_llm,
     )

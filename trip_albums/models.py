@@ -33,6 +33,7 @@ class Asset:
     lat: Optional[float] = None
     lon: Optional[float] = None
     taken_at: Optional[datetime] = None
+    original_path: Optional[str] = None
 
     @property
     def has_coords(self):
@@ -57,6 +58,7 @@ class Asset:
             lat=float(lat) if lat is not None else None,
             lon=float(lon) if lon is not None else None,
             taken_at=_parse_dt(taken),
+            original_path=raw.get("originalPath"),
         )
 
 
@@ -81,7 +83,6 @@ class Trip:
     key: str  # trip_key = earliest asset id
     assets: list  # list[Asset], chronologically sorted
     title: Optional[str] = None
-    title_source: str = "fallback"  # "llm" | "cache" | "fallback"
     decisions: list = field(default_factory=list)  # boundary verdicts for render/audit
 
     @property
@@ -103,10 +104,12 @@ class Trip:
 
 @dataclass
 class Plan:
-    """The full dry-run plan: trips to album + assets to tag for review."""
+    """The full dry-run plan: trips to album."""
 
     trips: list = field(default_factory=list)  # list[Trip]
-    review_asset_ids: list = field(default_factory=list)
+    existing_trips: list = field(default_factory=list)  # list[Trip] already albumed
+    review_count: int = 0  # no-location assets near a trip (display only)
     home_count: int = 0
+    skip_count: int = 0  # assets without location data
     decisions: list = field(default_factory=list)  # all boundary decision records
     warnings: list = field(default_factory=list)

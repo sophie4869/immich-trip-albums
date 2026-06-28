@@ -13,7 +13,6 @@ def base_env(**overrides):
         "GAP_MAX_DAYS": "6",
         "TRIP_GAP_FALLBACK_DAYS": "4",
         "OUTLIER_MAX_ASSETS": "2",
-        "REVIEW_TAG": "needs-location-review",
         "ALBUM_PREFIX": "Trip — ",
     }
     env.update(overrides)
@@ -55,18 +54,6 @@ def test_home_coords_parsed_when_both_present():
     assert cfg.home_lat == 48.8566 and cfg.home_lon == 2.3522
     assert cfg.home_radius_km == 25.0
     assert cfg.has_home_coords is True
-
-
-def test_llm_disabled_without_key():
-    cfg = load_config(base_env())
-    assert cfg.llm_enabled is False
-
-
-def test_llm_enabled_with_key_unless_no_llm():
-    cfg = load_config(base_env(ANTHROPIC_API_KEY="sk-ant"))
-    assert cfg.llm_enabled is True
-    cfg2 = load_config(base_env(ANTHROPIC_API_KEY="sk-ant"), no_llm=True)
-    assert cfg2.llm_enabled is False
 
 
 def test_url_trailing_slash_stripped():

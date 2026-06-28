@@ -1,4 +1,4 @@
-"""Idempotent application of a Plan to Immich: albums + review tag (spec §9)."""
+"""Idempotent application of a Plan to Immich: albums (spec §9)."""
 
 from dataclasses import dataclass, field
 
@@ -10,7 +10,6 @@ class ApplyResult:
     created: list = field(default_factory=list)
     updated: list = field(default_factory=list)
     renamed: list = field(default_factory=list)
-    tagged_count: int = 0
     warnings: list = field(default_factory=list)
 
 
@@ -31,7 +30,7 @@ def _index_albums(client):
     return index
 
 
-def apply_plan(plan, client, config):
+def apply_plan(plan, client):
     result = ApplyResult()
     existing = _index_albums(client)
 
@@ -60,19 +59,4 @@ def apply_plan(plan, client, config):
         client.create_album(trip.title, f"{MARKER}{trip.key}", trip.asset_ids)
         result.created.append(trip.title)
 
-    _apply_tag(plan, client, config, result)
     return result
-
-
-def _apply_tag(plan, client, config, result):
-    if not plan.review_asset_ids:
-        return
-    tag_id = None
-    for tag in client.list_tags():
-        if (tag.get("name") or "").lower() == config.review_tag.lower():
-            tag_id = tag["id"]
-            break
-    if tag_id is None:
-        tag_id = client.create_tag(config.review_tag)["id"]
-    client.tag_assets([tag_id], plan.review_asset_ids)
-    result.tagged_count = len(plan.review_asset_ids)

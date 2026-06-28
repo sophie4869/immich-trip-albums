@@ -8,9 +8,9 @@ def cfg(**overrides):
     return load_config(base_env(**overrides))
 
 
-def test_no_location_is_review():
+def test_no_location_is_skip():
     a = asset(city=None, state=None, lat=None, lon=None)
-    assert classify_one(a, cfg()) == "review"
+    assert classify_one(a, cfg()) == "skip"
 
 
 def test_name_match_home():
@@ -49,18 +49,18 @@ def test_coords_only_outside_radius_is_away():
     assert classify_one(a, cfg(HOME_LAT="48.8566", HOME_LON="2.3522", HOME_RADIUS_KM="25")) == "away"
 
 
-def test_coords_only_without_home_coords_is_review():
+def test_coords_only_without_home_coords_is_skip():
     a = asset(city=None, state=None, lat=43.30, lon=5.37)
-    assert classify_one(a, cfg()) == "review"
+    assert classify_one(a, cfg()) == "skip"
 
 
 def test_classify_assets_partitions_and_counts():
     assets = [
         asset(id="home1", city="Paris", country="France"),
         asset(id="away1", city="Lisbon", country="Portugal"),
-        asset(id="rev1", city=None, lat=None, lon=None),
+        asset(id="noloc1", city=None, lat=None, lon=None),
     ]
     result = classify_assets(assets, cfg())
     assert [a.id for a in result.away] == ["away1"]
-    assert result.review_asset_ids == ["rev1"]
     assert result.home_count == 1
+    assert result.skip_count == 1

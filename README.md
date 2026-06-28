@@ -2,31 +2,28 @@
 
 Scans an [Immich](https://immich.app) library, finds photos and videos taken
 **away from home**, clusters them into **trips**, and creates **one album per
-trip**. Assets with no usable location are tagged for manual review instead of
-being albumed. **Dry-run by default**, idempotent on re-runs.
-
-A thin, optional LLM layer (Claude) adjudicates ambiguous trip boundaries and
-writes nicer album titles. With no `ANTHROPIC_API_KEY` (or `--no-llm`) the whole
-tool runs as a pure deterministic pipeline and still produces correct results.
+trip**. Screenshots and assets without any location data are silently skipped.
+**Dry-run by default**, idempotent on re-runs.
 
 ## How it works
 
 ```
 fetch assets ─▶ classify ─▶ cluster into trips ─▶ name ─▶ (dry-run plan │ apply)
                    │             │                  │
-              home/away/      gap + country      LLM or
-              review          boundaries         fallback
+              home/away/      gap + country      mechanical
+              skip            boundaries         fallback title
 ```
 
-- **Classify** — each asset is exactly one of: *no-location* (→ review tag),
-  *home* (city/state name match, optionally guarded by `HOME_COUNTRIES`, plus an
-  optional home-GPS radius for coordinates-only shots), or *away*.
+- **Classify** — each asset is exactly one of: *skip* (no location data, or a
+  screenshot without location), *home* (city/state name match, optionally guarded
+  by `HOME_COUNTRIES`, plus an optional home-GPS radius for coordinates-only shots),
+  or *away*.
 - **Cluster** — away-assets are cut into provisional clusters at every gap ≥
   `GAP_MIN_DAYS` or country change; a gap ≥ `GAP_MAX_DAYS` is always a separate
-  trip, and anything in between is adjudicated (LLM, or a deterministic
-  `TRIP_GAP_FALLBACK_DAYS` rule).
-- **Name** — each trip gets an LLM title (e.g. *Portugal road trip*) or a
-  mechanical `City, Mon Year` fallback.
+  trip, and anything in between is decided by a deterministic
+  `TRIP_GAP_FALLBACK_DAYS` rule.
+- **Name** — each trip gets a mechanical `City, Mon Year` title based on its
+  assets' location metadata.
 - **Apply** — albums are identified by a marker stored in the album description
   (`[immich-trip-albummer] key=<earliest-asset-id>`), so re-runs reuse and update
   albums instead of duplicating them.
@@ -43,7 +40,13 @@ pip install -e ".[dev]"
 
 ## Configure
 
-Copy `.env.example` to `.env` and fill it in:
+Use the interactive setup script to generate a `.env` file:
+
+```bash
+bash setup-env.sh
+```
+
+Or copy `.env.example` and fill it in manually:
 
 ```bash
 cp .env.example .env
@@ -58,10 +61,8 @@ cp .env.example .env
 | `HOME_COUNTRIES` | Optional guard so `Paris, Texas` isn't treated as home |
 | `HOME_LAT` / `HOME_LON` / `HOME_RADIUS_KM` | Optional home GPS radius, used only for coordinates-only assets |
 | `GAP_MIN_DAYS` / `GAP_MAX_DAYS` / `TRIP_GAP_FALLBACK_DAYS` | Trip-splitting thresholds |
-| `OUTLIER_MAX_ASSETS` | Cluster size that flags a boundary as an outlier (LLM context only) |
-| `REVIEW_TAG` | Tag applied to no-location assets |
-| `ALBUM_PREFIX` | Prefix for trip album names |
-| `ANTHROPIC_API_KEY` | Optional; enables the LLM layer |
+| `OUTLIER_MAX_ASSETS` | Cluster size that flags a boundary as an outlier (annotation only) |
+| `ALBUM_PREFIX` | Prefix for trip album names (default: `Trip — `) |
 
 ## Run
 
@@ -71,16 +72,10 @@ Dry run (default — prints the plan, changes nothing):
 trip-albums --env .env
 ```
 
-Apply (creates albums and tags):
+Apply (creates albums):
 
 ```bash
 trip-albums --env .env --apply
-```
-
-Deterministic only (skip the LLM even if a key is set):
-
-```bash
-trip-albums --env .env --no-llm
 ```
 
 Scope to a date range — a safe first pass, an incremental/cron run, or
@@ -95,10 +90,7 @@ trip-albums --env .env --since 2025-04-01 --until 2025-04-30
 `--since` / `--until` filter **server-side** (`takenAfter`/`takenBefore`), so a
 big library isn't fetched whole. A `GAP_MAX_DAYS` buffer is fetched on each side
 of the window so a trip straddling an edge still clusters correctly; only trips
-(and review assets) with at least one photo inside the window are albumed.
-
-Every LLM decision (and its deterministic fallback) is logged to
-`escalations.jsonl` so you can see why a trip was split or named the way it was.
+with at least one photo inside the window are albumed.
 
 ## Idempotency notes
 
@@ -110,10 +102,16 @@ Every LLM decision (and its deterministic fallback) is logged to
   previously-albumed trip differently. The tool never deletes or rewrites albums
   it made; reconcile those manually.
 
+## Screenshot filtering
+
+Assets whose `originalPath` contains `screenshot`, `screen shot`, `screen_shot`,
+or `screens/` and have no location data are automatically skipped and not counted
+toward trips.
+
 ## Immich API version
 
 Endpoints and fields target a recent Immich API (`/api/search/metadata`,
-`/api/albums`, `/api/tags`, with `exifInfo` carrying
+`/api/albums`, with `exifInfo` carrying
 `city/state/country/dateTimeOriginal/latitude/longitude`). If your instance
 differs, the client fails loudly naming the endpoint. **Pin and test against your
 own server version** rather than assuming `main`.
@@ -125,4 +123,4 @@ pytest -q
 ```
 
 The deterministic core (classification, clustering, naming, idempotency) is fully
-unit-tested with no network and no LLM calls.
+unit-tested with no network calls.

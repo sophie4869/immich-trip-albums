@@ -6,7 +6,7 @@ class ImmichError(Exception):
 
 
 class ImmichClient:
-    def __init__(self, base_url, api_key, session=None, page_size=1000, timeout=30):
+    def __init__(self, base_url, api_key, session=None, page_size=1000, timeout=120):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.page_size = page_size
@@ -78,14 +78,5 @@ class ImmichClient:
     def add_assets(self, album_id, asset_ids):
         return self._request("PUT", f"/api/albums/{album_id}/assets", json={"ids": asset_ids}).json()
 
-    # -- tags ---------------------------------------------------------------
-
-    def list_tags(self):
-        return self._request("GET", "/api/tags").json()
-
-    def create_tag(self, name):
-        return self._request("POST", "/api/tags", json={"name": name}).json()
-
-    def tag_assets(self, tag_ids, asset_ids):
-        body = {"tagIds": tag_ids, "assetIds": asset_ids}
-        return self._request("PUT", "/api/tags/assets", json=body).json()
+    def get_album(self, album_id):
+        return self._request("GET", f"/api/albums/{album_id}").json()
