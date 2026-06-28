@@ -59,7 +59,7 @@ Config block / `.env` at the top of the script:
 | `GAP_MIN_DAYS` | A gap `≥` this (or any country change) opens a boundary; below it, same-country assets always merge | `1.5` |
 | `GAP_MAX_DAYS` | A gap `≥` this is **always** a hard split, regardless of country | `6` |
 | `TRIP_GAP_FALLBACK_DAYS` | Split point used **only** as the deterministic fallback for an *ambiguous* boundary (no LLM / invalid verdict). Must satisfy `GAP_MIN_DAYS ≤ TRIP_GAP_FALLBACK_DAYS ≤ GAP_MAX_DAYS` | `4` |
-| `OUTLIER_MAX_ASSETS` | A cluster with `≤` this many assets at a boundary is an "outlier" trigger | `2` |
+| `OUTLIER_MAX_ASSETS` | Outlier **annotation** threshold: a cluster with `≤` this many assets at a soft boundary is flagged `outlier` as LLM context. Annotation only — never creates or overrides a boundary (§6) | `2` |
 | `REVIEW_TAG` | Tag applied to no-location assets | `needs-location-review` |
 | `ALBUM_PREFIX` | Namespacing prefix for trip albums | `Trip — ` |
 | `ANTHROPIC_API_KEY` | Optional; enables the LLM layer | — |
@@ -221,15 +221,22 @@ escalate(kind, payload, response_schema, fallback_fn) -> verdict
 Responsibilities: prompt assembly, Claude API call, schema validation, caching,
 audit logging, and fallback on any failure. The caller supplies an explicit
 **cache key** chosen to reuse a verdict exactly when it is still valid:
-- `resolve_boundary` keys on the **decision-relevant facts** of the boundary —
-  bucketed `gap_days`, both `country` values, `cause`, the `outlier` flag, and a
-  bucketed `approx_distance_km` — **not** on raw `count` and **not** on the
-  earliest-asset ids alone. Rationale: keying on ids alone (an earlier idea) would
-  freeze a stale verdict when new photos materially change the gap/countries/
-  distance; keying on the facts means a boundary is re-adjudicated only when the
-  inputs that drove the decision actually change, and adding photos *inside* a
-  trip (which doesn't move the boundary facts) still hits the cache. Bucketing
-  keeps trivial jitter (a few hours, a few km) from forcing re-adjudication.
+- `resolve_boundary` keys on a **composite** of *boundary identity* **and**
+  *decision-relevant facts*:
+  - **Identity** — the stable endpoint ids of the boundary: the earliest-asset id
+    of the left cluster and of the right cluster. This pins the key to *this*
+    boundary so two unrelated boundaries can never collide on coincidentally-equal
+    facts.
+  - **Facts** — bucketed `gap_days`, both `country` values, `cause`, the `outlier`
+    flag, and bucketed `approx_distance_km`. This invalidates the cache when the
+    inputs that drove the verdict materially change.
+  Both are required. Identity alone would freeze a stale verdict when new photos
+  move the gap/countries/distance; facts alone would let distinct boundaries reuse
+  each other's verdict. With the composite, adding photos *inside* a trip (neither
+  endpoint nor facts move) still hits the cache, while a material change to the
+  boundary re-adjudicates, and unrelated boundaries are always distinct. `count`
+  is excluded; bucketing keeps trivial jitter (a few hours, a few km) from forcing
+  re-adjudication.
 - `name_trip` keys on `trip_key` (§7) — titles are display-only and must stay
   stable as a trip grows, so identity (not facts) is the right key there.
 
@@ -310,9 +317,10 @@ verdict, reason, and whether the verdict or the fallback was applied. This answe
 - **`escalate`** → injected fake adjudicator. Assert: a valid verdict is adopted;
   an invalid verdict triggers the fallback; a repeated cache key does not
   re-invoke the adjudicator; `--no-llm` always routes to fallback. Plus
-  `resolve_boundary` cache-key behavior: adding photos *inside* a trip (boundary
-  facts unchanged) hits the cache, while a change to gap-bucket/country/distance
-  re-adjudicates.
+  `resolve_boundary` composite cache-key behavior: adding photos *inside* a trip
+  (endpoints + facts unchanged) hits the cache; a change to gap-bucket/country/
+  distance re-adjudicates; and two boundaries with identical fact-buckets but
+  different endpoint ids get **distinct** keys (no cross-boundary collision).
 - **Idempotency** → given recorded album/tag responses, assert: marker parsing
   finds the right album by `trip_key`; a changed title triggers `PATCH` (not a new
   album); growing a trip re-uses the album; the re-clustering/earlier-import edge
