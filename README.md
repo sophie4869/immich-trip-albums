@@ -83,6 +83,20 @@ Deterministic only (skip the LLM even if a key is set):
 trip-albums --env .env --no-llm
 ```
 
+Scope to a date range — a safe first pass, an incremental/cron run, or
+reprocessing one window:
+
+```bash
+trip-albums --env .env --since 2025-01-01            # everything from Jan 1
+trip-albums --env .env --since 2025-06-01 --apply    # e.g. nightly "new photos" run
+trip-albums --env .env --since 2025-04-01 --until 2025-04-30
+```
+
+`--since` / `--until` filter **server-side** (`takenAfter`/`takenBefore`), so a
+big library isn't fetched whole. A `GAP_MAX_DAYS` buffer is fetched on each side
+of the window so a trip straddling an edge still clusters correctly; only trips
+(and review assets) with at least one photo inside the window are albumed.
+
 Every LLM decision (and its deterministic fallback) is logged to
 `escalations.jsonl` so you can see why a trip was split or named the way it was.
 

@@ -29,11 +29,13 @@ class ImmichClient:
 
     # -- assets -------------------------------------------------------------
 
-    def search_all_assets(self):
+    def search_all_assets(self, taken_after=None, taken_before=None):
         """Return all visible IMAGE/VIDEO-eligible assets with exif, across pages.
 
         Omits `type` (single-valued in the API) and filters client-side later;
-        excludes deleted assets and restricts to the normal timeline.
+        excludes deleted assets and restricts to the normal timeline. Optional
+        `taken_after`/`taken_before` (ISO-8601 strings) push date filtering
+        server-side via the API's `takenAfter`/`takenBefore`.
         """
         items = []
         page = 1
@@ -45,6 +47,10 @@ class ImmichClient:
                 "page": page,
                 "size": self.page_size,
             }
+            if taken_after is not None:
+                body["takenAfter"] = taken_after
+            if taken_before is not None:
+                body["takenBefore"] = taken_before
             resp = self._request("POST", "/api/search/metadata", json=body)
             data = resp.json()
             assets = data.get("assets")

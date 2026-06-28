@@ -53,6 +53,22 @@ def test_search_sends_api_key_header_and_excludes_deleted():
     assert sess.calls[0]["json"]["withExif"] is True
 
 
+def test_search_passes_date_filters_when_given():
+    c, sess = client([FakeResponse(200, {"assets": {"items": [], "nextPage": None}})])
+    c.search_all_assets(taken_after="2025-04-01T00:00:00+00:00",
+                        taken_before="2025-05-01T00:00:00+00:00")
+    body = sess.calls[0]["json"]
+    assert body["takenAfter"] == "2025-04-01T00:00:00+00:00"
+    assert body["takenBefore"] == "2025-05-01T00:00:00+00:00"
+
+
+def test_search_omits_date_filters_when_absent():
+    c, sess = client([FakeResponse(200, {"assets": {"items": [], "nextPage": None}})])
+    c.search_all_assets()
+    assert "takenAfter" not in sess.calls[0]["json"]
+    assert "takenBefore" not in sess.calls[0]["json"]
+
+
 def test_non_2xx_raises_named_error():
     c, _ = client([FakeResponse(401, {"error": "unauthorized"})])
     with pytest.raises(ImmichError) as exc:

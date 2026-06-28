@@ -92,3 +92,44 @@ def test_title_prefixed_and_sourced():
     plan = build_plan(assets, cfg(), esc(FakeAdjudicator()))
     assert plan.trips[0].title == "Trip — Nice Trip"
     assert plan.trips[0].title_source == "llm"
+
+
+def _dt(s):
+    from datetime import datetime, timezone
+    return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(timezone.utc)
+
+
+def test_window_drops_trips_entirely_outside_range():
+    assets = [
+        asset(id="old", city="Lisbon", country="Portugal", taken=day(1)),   # buffer trip
+        asset(id="new", city="Rome", country="Italy", taken=day(25)),       # in-window trip
+    ]
+    window = (_dt(day(20)), _dt(day(30)))
+    plan = build_plan(assets, cfg(), esc(FakeAdjudicator()), window=window)
+    assert [t.key for t in plan.trips] == ["new"]
+
+
+def test_window_keeps_trip_straddling_the_edge():
+    # One trip spanning day 19 -> day 21 (gap within GAP_MIN so it stays one cluster);
+    # window starts at day 20, so it straddles and must be kept.
+    assets = [
+        asset(id="s1", city="Lisbon", country="Portugal", taken=day(19)),
+        asset(id="s2", city="Lisbon", country="Portugal", taken=f"2025-04-19T18:00:00Z"),
+    ]
+    window = (_dt(day(20)), _dt(day(30)))
+    # s2 at day19 18:00 is still before day20 -> this trip is fully before window; dropped.
+    # Add an in-window asset to the same cluster to make it straddle:
+    assets.append(asset(id="s3", city="Lisbon", country="Portugal", taken=f"2025-04-20T18:00:00Z"))
+    plan = build_plan(assets, cfg(), esc(FakeAdjudicator()), window=window)
+    assert len(plan.trips) == 1
+    assert "s3" in plan.trips[0].asset_ids
+
+
+def test_window_filters_review_assets_by_date():
+    assets = [
+        asset(id="rev_old", city=None, lat=None, lon=None, taken=day(1)),
+        asset(id="rev_new", city=None, lat=None, lon=None, taken=day(25)),
+    ]
+    window = (_dt(day(20)), _dt(day(30)))
+    plan = build_plan(assets, cfg(), esc(FakeAdjudicator()), window=window)
+    assert plan.review_asset_ids == ["rev_new"]

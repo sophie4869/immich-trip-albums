@@ -26,7 +26,24 @@ def _cluster_summary(cluster):
     }
 
 
-def build_plan(assets, config, escalator):
+def _in_window(dt, window):
+    if window is None or dt is None:
+        return window is None
+    since, until = window
+    if since is not None and dt < since:
+        return False
+    if until is not None and dt > until:
+        return False
+    return True
+
+
+def build_plan(assets, config, escalator, window=None):
+    """Build a dry-run Plan.
+
+    When `window` is a (since, until) datetime pair, assets outside it may still
+    be fetched (a buffer lets edge trips cluster correctly), but only trips and
+    review assets with at least one in-window asset are kept.
+    """
     classified = classify_assets(assets, config)
     away = sorted(classified.away, key=lambda a: a.taken_at)
 
@@ -65,6 +82,9 @@ def build_plan(assets, config, escalator):
 
     trips = resolve(clusters, bs, verdicts)
 
+    if window is not None:
+        trips = [t for t in trips if any(_in_window(a.taken_at, window) for a in t.assets)]
+
     name_fallback = make_name_fallback()
     for trip in trips:
         bare = fallback_title(trip.assets, "")  # no prefix; planner prepends below
@@ -79,9 +99,14 @@ def build_plan(assets, config, escalator):
         applied = escalator.last["applied"] if escalator.last else "fallback"
         trip.title_source = {"verdict": "llm", "cache": "cache"}.get(applied, "fallback")
 
+    review_ids = classified.review_asset_ids
+    if window is not None:
+        taken = {a.id: a.taken_at for a in assets}
+        review_ids = [i for i in review_ids if _in_window(taken.get(i), window)]
+
     return Plan(
         trips=trips,
-        review_asset_ids=classified.review_asset_ids,
+        review_asset_ids=review_ids,
         home_count=classified.home_count,
         decisions=decisions,
     )

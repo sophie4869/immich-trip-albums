@@ -31,12 +31,45 @@ def test_render_shows_boundary_decisions_and_warnings():
 class FakeImmich:
     def __init__(self):
         self.applied = False
+        self.search_kwargs = None
 
-    def search_all_assets(self):
+    def search_all_assets(self, taken_after=None, taken_before=None):
+        self.search_kwargs = {"taken_after": taken_after, "taken_before": taken_before}
         return [
             api_asset(id="a", city="Lisbon", country="Portugal", taken="2025-04-01T10:00:00Z"),
             api_asset(id="b", city="Rome", country="Italy", taken="2025-04-20T10:00:00Z"),
         ]
+
+
+def test_parse_window_computes_buffered_fetch_range():
+    window, fetch_after, fetch_before = cli._parse_window("2025-04-10", "2025-04-20", 6.0)
+    assert window is not None
+    assert fetch_after.startswith("2025-04-04")   # since - 6 days
+    assert fetch_before.startswith("2025-04-26")  # until + 6 days
+
+
+def test_parse_window_none_when_unset():
+    assert cli._parse_window(None, None, 6.0) == (None, None, None)
+
+
+def test_parse_window_rejects_bad_date():
+    import pytest
+    with pytest.raises(ValueError):
+        cli._parse_window("not-a-date", None, 6.0)
+
+
+def test_main_since_passes_fetch_dates(monkeypatch, capsys):
+    for k, v in base_env().items():
+        monkeypatch.setenv(k, v)
+    fake = FakeImmich()
+    monkeypatch.setattr(cli, "make_immich_client", lambda config: fake)
+    rc = cli.main(["--no-llm", "--since", "2025-04-15"])
+    assert rc == 0
+    # since 2025-04-15 minus the 6-day GAP_MAX buffer -> fetch from 2025-04-09
+    assert fake.search_kwargs["taken_after"].startswith("2025-04-09")
+    # only the in-window Rome trip (Apr 20) survives; Lisbon (Apr 1) is buffer-only
+    out = capsys.readouterr().out
+    assert "Rome" in out and "Lisbon" not in out
 
 
 def test_main_dry_run_no_llm(monkeypatch, capsys):
