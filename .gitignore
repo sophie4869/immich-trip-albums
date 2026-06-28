@@ -1,5 +1,7 @@
 .env
 __pycache__/
 *.pyc
+*.egg-info/
 escalations.jsonl
 .venv/
+.pytest_cache/
