@@ -23,6 +23,7 @@ class Escalator:
         self.adjudicator = adjudicator  # callable(kind, payload) -> dict, or None
         self.audit = audit or (lambda record: None)
         self.cache = cache if cache is not None else {}
+        self.last = None  # the most recent audit record (lets callers read `applied`)
 
     def escalate(self, kind, payload, cache_key, schema, fallback_fn):
         # No LLM configured -> deterministic fallback.
@@ -54,11 +55,13 @@ class Escalator:
         return verdict
 
     def _record(self, kind, cache_key, payload, applied, verdict, reason):
-        self.audit({
+        record = {
             "kind": kind,
             "cache_key": cache_key,
             "payload": payload,
             "applied": applied,
             "verdict": verdict,
             "reason": reason,
-        })
+        }
+        self.last = record
+        self.audit(record)
