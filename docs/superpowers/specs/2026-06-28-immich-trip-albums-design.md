@@ -56,16 +56,16 @@ Config block / `.env` at the top of the script:
 | `GAP_MIN_DAYS` | Below this, adjacent clusters are *always merged* | `1.5` |
 | `GAP_MAX_DAYS` | Above this, adjacent clusters are *always split* | `6` |
 | `TRIP_GAP_FALLBACK_DAYS` | Split point used **only** as the deterministic fallback for an *ambiguous* boundary (no LLM / invalid verdict). Must satisfy `GAP_MIN_DAYS ≤ TRIP_GAP_FALLBACK_DAYS ≤ GAP_MAX_DAYS` | `4` |
+| `OUTLIER_MAX_ASSETS` | A cluster with `≤` this many assets at a boundary is an "outlier" trigger | `2` |
+| `REVIEW_TAG` | Tag applied to no-location assets | `needs-location-review` |
+| `ALBUM_PREFIX` | Namespacing prefix for trip albums | `Trip — ` |
+| `ANTHROPIC_API_KEY` | Optional; enables the LLM layer | — |
 
 **Threshold roles (authoritative).** `GAP_MIN_DAYS` / `GAP_MAX_DAYS` bound the
 deterministic first pass: only gaps strictly inside that band are ever ambiguous.
 `TRIP_GAP_FALLBACK_DAYS` is **not** a first-pass threshold — it is consulted only
 when an ambiguous boundary cannot be resolved by the LLM, where gap `≥
 TRIP_GAP_FALLBACK_DAYS` → split, else merge.
-| `OUTLIER_MAX_ASSETS` | A cluster with `≤` this many assets at a boundary is an "outlier" trigger | `2` |
-| `REVIEW_TAG` | Tag applied to no-location assets | `needs-location-review` |
-| `ALBUM_PREFIX` | Namespacing prefix for trip albums | `Trip — ` |
-| `ANTHROPIC_API_KEY` | Optional; enables the LLM layer | — |
 
 CLI flags: `--apply` (perform writes; default is dry-run), `--no-llm` (force
 deterministic-only), `--llm-names` is implied when a key is present.
