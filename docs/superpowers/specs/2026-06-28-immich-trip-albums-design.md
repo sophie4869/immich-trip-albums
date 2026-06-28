@@ -53,9 +53,16 @@ Config block / `.env` at the top of the script:
 | `IMMICH_API_KEY` | Sent as `x-api-key` header | — |
 | `HOME_CITIES` | City names that count as home (case-insensitive) | `["Paris"]` |
 | `HOME_STATES` | Optional broader home match (state/region) | `["Île-de-France"]` |
-| `TRIP_GAP_DAYS` | Gap that starts a new trip | `4` |
 | `GAP_MIN_DAYS` | Below this, adjacent clusters are *always merged* | `1.5` |
 | `GAP_MAX_DAYS` | Above this, adjacent clusters are *always split* | `6` |
+| `TRIP_GAP_FALLBACK_DAYS` | Split point used **only** as the deterministic fallback for an *ambiguous* boundary (no LLM / invalid verdict). Must satisfy `GAP_MIN_DAYS ≤ TRIP_GAP_FALLBACK_DAYS ≤ GAP_MAX_DAYS` | `4` |
+
+**Threshold roles (authoritative).** `GAP_MIN_DAYS` / `GAP_MAX_DAYS` bound the
+deterministic first pass: only gaps strictly inside that band are ever ambiguous.
+`TRIP_GAP_FALLBACK_DAYS` is **not** a first-pass threshold — it is consulted only
+when an ambiguous boundary cannot be resolved by the LLM, where gap `≥
+TRIP_GAP_FALLBACK_DAYS` → split, else merge.
+| `OUTLIER_MAX_ASSETS` | A cluster with `≤` this many assets at a boundary is an "outlier" trigger | `2` |
 | `REVIEW_TAG` | Tag applied to no-location assets | `needs-location-review` |
 | `ALBUM_PREFIX` | Namespacing prefix for trip albums | `Trip — ` |
 | `ANTHROPIC_API_KEY` | Optional; enables the LLM layer | — |
@@ -80,13 +87,23 @@ mismatch is obvious rather than silent).
 
 ## 5. Classification
 
-For each asset:
+For each asset, evaluated in order:
 
-- **No location** — no `city` **and** no lat/lon → queue for the `REVIEW_TAG`,
-  exclude from albums.
-- **Home** — `city` matches `HOME_CITIES` (or `state` matches `HOME_STATES`),
-  case-insensitive → ignore.
-- **Away** — has a location, not home → feed into trip clustering.
+1. **No location** — no `city` **and** no `lat/lon` → queue for the `REVIEW_TAG`,
+   exclude from albums.
+2. **Home** — `city` matches `HOME_CITIES` **or** `state` matches `HOME_STATES`
+   (case-insensitive) → ignore.
+3. **Coordinates-only** — has `lat/lon` but **no** `city`/`state` (a common
+   Immich geocoding gap). This is **not** "no location" and cannot be name-matched
+   against home, so → treat as **away** and feed into clustering. Such an asset's
+   `country`/`city` are `None`; clustering and naming must tolerate that (it
+   contributes `lat/lon` for distance but no city to the name; the country-change
+   trigger ignores `None` countries).
+4. **Away** — has a `city` (or `state`), not matching home → feed into clustering.
+
+Rationale for ordering: coordinates-only assets are kept (they are genuinely
+located, just un-geocoded) rather than dumped into review, because dropping every
+location-on-but-not-yet-geocoded shot would silently miss real trips.
 
 ## 6. Trip Clustering + Boundary Escalation
 
@@ -94,16 +111,23 @@ For each asset:
    gap `> GAP_MAX_DAYS` → **always split**; gap `< GAP_MIN_DAYS` → **always
    merge**. Produces initial clusters.
 2. **Identify ambiguous boundaries.** An adjacent cluster pair enters the
-   escalation queue if **any** of:
-   - the gap is in the middle band (`GAP_MIN_DAYS .. GAP_MAX_DAYS`); or
-   - the two clusters are in different `country`/major region; or
-   - a 1–2 asset singleton/sparse outlier sits at the boundary.
+   escalation queue if **any** of these concrete triggers fires:
+   - **Middle-band gap** — `GAP_MIN_DAYS < gap_days < GAP_MAX_DAYS`.
+   - **Country change** — the two clusters' Immich `country` fields differ and
+     both are non-`None` (a `None` country never triggers this).
+   - **Sparse outlier** — either adjacent cluster has `≤ OUTLIER_MAX_ASSETS`
+     assets (default `2`) — e.g. a layover or single drive-through shot between
+     two larger trips.
+   `approx_distance_km` is the great-circle (haversine) distance between the two
+   clusters' centroids, where a cluster centroid is the mean of its assets'
+   available `lat/lon`. If either cluster has **no** coordinates at all,
+   `approx_distance_km` is `null` and is simply omitted from the LLM's reasoning.
 3. **Batch escalate `resolve_boundary`.** Pack all queued boundaries into one (or
    a few) Claude API call(s). Each boundary payload:
    `{ left: {cities, dates, count}, right: {cities, dates, count}, gap_days,
    approx_distance_km }`. Response per boundary:
    `{ decision: "merge" | "split", reason }`. Schema-invalid or no key →
-   fallback to the `TRIP_GAP_DAYS` threshold.
+   fallback to the `TRIP_GAP_FALLBACK_DAYS` rule (gap `≥` → split, else merge).
 4. Apply merge/split verdicts to produce final trips.
 
 ## 7. Naming (enrichment)
@@ -136,10 +160,12 @@ fallback.
 
 With `--apply`:
 
-- **Albums** — `GET /api/albums` first; reuse an album whose name already exists
-  (re-runs don't duplicate), else `POST /api/albums`. Add assets via
-  `PUT /api/albums/{id}/assets`; Immich skips assets already in the album, so
-  re-adds are safe.
+- **Albums** — `GET /api/albums` first; reuse an album whose name matches the
+  intended title **exactly** (full title including `ALBUM_PREFIX`), else
+  `POST /api/albums`. Add assets via `PUT /api/albums/{id}/assets`; Immich skips
+  assets already in the album, so re-adds are safe. Note: changing `ALBUM_PREFIX`
+  or an LLM-generated title between runs yields a new album rather than renaming
+  the old one — exact-match reuse is the predictable, least-surprising rule.
 - **Tag** — ensure `REVIEW_TAG` exists (`POST /api/tags`), then bulk-attach the
   no-location assets via the tag-assets endpoint.
 
