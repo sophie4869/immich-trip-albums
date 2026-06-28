@@ -404,8 +404,10 @@ Provides:
 Sends `x-api-key`. Methods (spec §4/§9), all raising a clear `ImmichError` on
 non-2xx or unexpected shape:
 - `search_all_assets()` → generator/list across pages: POST `/api/search/metadata`
-  with `{withExif: true, withDeleted: false, page, size: 1000}` (omit `type`),
-  loop on `assets.nextPage`, yield `assets.items`.
+  with `{withExif: true, withDeleted: false, visibility: "timeline", page,
+  size: 1000}` (omit `type`; `visibility: "timeline"` excludes archived/locked/
+  hidden — confirm the exact enum value against the target server's
+  `AssetVisibility`), loop on `assets.nextPage`, yield `assets.items`.
 - `list_albums()` → GET `/api/albums`.
 - `create_album(name, description, asset_ids)` → POST `/api/albums`.
 - `rename_album(album_id, name)` → PATCH `/api/albums/{id}`.
@@ -433,8 +435,9 @@ non-2xx or unexpected shape:
 
 `build_plan(assets, config, adjudicator, audit) -> Plan`. Orchestrates:
 fetch is done by caller; here: classify → sort away → provisional clusters →
-boundaries → for each soft boundary call `escalate("resolve_boundary", payload,
-boundary_cache_key, BOUNDARY_SCHEMA, boundary_fallback, adjudicator, audit)` →
+boundaries → for each soft boundary compute `key = boundary_cache_key(boundary)`
+(a string) then call `escalate("resolve_boundary", payload, key, BOUNDARY_SCHEMA,
+boundary_fallback, adjudicator, audit)` →
 `resolve` into trips → for each trip compute `trip_key` and call
 `escalate("name_trip", ...)` (fallback `name_fallback`) → assemble `Plan` with
 `trips` (id=trip_key, title, asset_ids, date range, city summary, per-boundary
