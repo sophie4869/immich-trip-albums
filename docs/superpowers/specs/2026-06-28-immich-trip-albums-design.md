@@ -51,8 +51,10 @@ Config block / `.env` at the top of the script:
 |-----|---------|---------|
 | `IMMICH_URL` | Base URL of the Immich instance | `https://immich.example.com` |
 | `IMMICH_API_KEY` | Sent as `x-api-key` header | — |
-| `HOME_CITIES` | City names that count as home (case-insensitive) | `["Paris"]` |
+| `HOME_CITIES` | City names that count as home (case-insensitive). Primary home rule | `["Paris"]` |
 | `HOME_STATES` | Optional broader home match (state/region) | `["Île-de-France"]` |
+| `HOME_LAT` / `HOME_LON` | Optional home coordinates. Used **only** to classify *coordinates-only* assets (GPS present, no geocoded city). Leave unset to disable | `48.8566` / `2.3522` |
+| `HOME_RADIUS_KM` | Radius around `HOME_LAT/LON` counted as home (only if home coords set) | `25` |
 | `GAP_MIN_DAYS` | Below this, adjacent clusters are *always merged* | `1.5` |
 | `GAP_MAX_DAYS` | Above this, adjacent clusters are *always split* | `6` |
 | `TRIP_GAP_FALLBACK_DAYS` | Split point used **only** as the deterministic fallback for an *ambiguous* boundary (no LLM / invalid verdict). Must satisfy `GAP_MIN_DAYS ≤ TRIP_GAP_FALLBACK_DAYS ≤ GAP_MAX_DAYS` | `4` |
@@ -72,9 +74,25 @@ deterministic-only), `--llm-names` is implied when a key is present.
 
 ## 4. Data Fetch
 
-Pull all assets via `POST /api/search/metadata`, paginated (`page`/`size`,
-size ~1000), with `withExif: true` so each asset carries `exifInfo`. Request both
-images and videos. Accumulate a flat list of normalized records:
+Pull assets via `POST /api/search/metadata` with `withExif: true` so each asset
+carries `exifInfo`. Contract details (verified against the current Immich
+OpenAPI spec):
+
+- **Asset type.** `MetadataSearchDto.type` is a **single** `AssetTypeEnum`, not a
+  list. We therefore **omit `type`** (fetch all) and **filter client-side** to
+  `IMAGE` and `VIDEO`, dropping `OTHER`/`AUDIO`. (Avoids two round-trips and is
+  robust to enum additions.)
+- **Exclusions.** Set `withDeleted: false`; constrain `visibility` to the normal
+  timeline so archived / locked / hidden assets are excluded. Leave `withStacked`
+  at its default (stack children are not separately albumed). These defaults can
+  be overridden by config later if needed, but the spec's intent is "visible
+  timeline photos and videos only."
+- **Pagination.** Response is `SearchResponseDto` → `assets` is a
+  `SearchAssetResponseDto` with `items`, `total`, `count`, and `nextPage`. Loop:
+  send `page` (starting 1) with `size` ~1000; stop when `assets.nextPage` is
+  `null`.
+
+Accumulate a flat list of normalized records:
 
 ```
 { id, type, city, state, country, lat, lon, taken_at }
@@ -89,53 +107,76 @@ mismatch is obvious rather than silent).
 
 For each asset, evaluated in order:
 
-1. **No location** — no `city` **and** no `lat/lon` → queue for the `REVIEW_TAG`,
-   exclude from albums.
-2. **Home** — `city` matches `HOME_CITIES` **or** `state` matches `HOME_STATES`
-   (case-insensitive) → ignore.
-3. **Coordinates-only** — has `lat/lon` but **no** `city`/`state` (a common
-   Immich geocoding gap). This is **not** "no location" and cannot be name-matched
-   against home, so → treat as **away** and feed into clustering. Such an asset's
-   `country`/`city` are `None`; clustering and naming must tolerate that (it
-   contributes `lat/lon` for distance but no city to the name; the country-change
-   trigger ignores `None` countries).
+1. **No location** — no `city`/`state` **and** no `lat/lon` → queue for the
+   `REVIEW_TAG`, exclude from albums.
+2. **Home (by name)** — `city` matches `HOME_CITIES` **or** `state` matches
+   `HOME_STATES` (case-insensitive) → ignore.
+3. **Coordinates-only** — has `lat/lon` but **no** `city`/`state` (a common Immich
+   geocoding gap). Handled by the optional home-GPS check:
+   - If `HOME_LAT/HOME_LON` are configured: haversine distance to home ≤
+     `HOME_RADIUS_KM` → **home, ignore**; otherwise → **away**, feed into
+     clustering with `country`/`city` = `None` (contributes `lat/lon` for
+     distance but no city to the name; the country-change trigger ignores `None`).
+   - If home coords are **not** configured: → queue for the `REVIEW_TAG` (do
+     **not** assume away). This is the safe default that prevents un-geocoded home
+     photos from becoming fake trip albums.
 4. **Away** — has a `city` (or `state`), not matching home → feed into clustering.
 
-Rationale for ordering: coordinates-only assets are kept (they are genuinely
-located, just un-geocoded) rather than dumped into review, because dropping every
-location-on-but-not-yet-geocoded shot would silently miss real trips.
+Rationale: a coordinates-only asset is genuinely located but cannot be name-matched
+against home, so without a GPS home reference it is ambiguous — routing it to
+review (rather than to "away") avoids manufacturing home-trip albums, while the
+optional home radius lets users who set it recover those real trips automatically.
 
 ## 6. Trip Clustering + Boundary Escalation
 
-1. **Deterministic first pass.** Sort away-assets by `taken_at`. Walk them:
-   gap `> GAP_MAX_DAYS` → **always split**; gap `< GAP_MIN_DAYS` → **always
-   merge**. Produces initial clusters.
-2. **Identify ambiguous boundaries.** An adjacent cluster pair enters the
-   escalation queue if **any** of these concrete triggers fires:
-   - **Middle-band gap** — `GAP_MIN_DAYS < gap_days < GAP_MAX_DAYS`.
-   - **Country change** — the two clusters' Immich `country` fields differ and
-     both are non-`None` (a `None` country never triggers this).
-   - **Sparse outlier** — either adjacent cluster has `≤ OUTLIER_MAX_ASSETS`
-     assets (default `2`) — e.g. a layover or single drive-through shot between
-     two larger trips.
-   `approx_distance_km` is the great-circle (haversine) distance between the two
-   clusters' centroids, where a cluster centroid is the mean of its assets'
-   available `lat/lon`. If either cluster has **no** coordinates at all,
-   `approx_distance_km` is `null` and is simply omitted from the LLM's reasoning.
-3. **Batch escalate `resolve_boundary`.** Pack all queued boundaries into one (or
-   a few) Claude API call(s). Each boundary payload:
+The model is **provisional cuts first, then resolve the soft ones** — so every
+ambiguous boundary actually *exists* as a boundary (the previous "always-merge the
+middle band" wording left middle-band gaps with no boundary to escalate).
+
+1. **Provisional cut pass.** Sort away-assets by `taken_at`. Place a provisional
+   boundary between adjacent assets `i, i+1` iff **either**:
+   - `gap_days ≥ GAP_MIN_DAYS`, **or**
+   - `country` changes across the pair (both non-`None`).
+
+   Sub-`GAP_MIN`, same-country gaps never become boundaries (these are the only
+   "hard merges"). This yields provisional clusters and a list of provisional
+   boundaries, each of which is then classified exactly once below.
+2. **Classify each provisional boundary:**
+   - **Hard split** (no escalation) — `gap_days ≥ GAP_MAX_DAYS` **and** country is
+     unchanged/`None`. Distinct trips beyond doubt.
+   - **Soft boundary → escalate** — everything else. This covers, by construction:
+     - **Middle-band gap** — `GAP_MIN_DAYS ≤ gap_days < GAP_MAX_DAYS`;
+     - **Country change** — a country hop, *including* one with a small gap (it
+       became a boundary in step 1, so it is reviewed rather than force-merged);
+     - **Sparse outlier** — either side has `≤ OUTLIER_MAX_ASSETS` assets
+       (default `2`), e.g. a layover or single drive-through shot.
+
+   `approx_distance_km` for a soft boundary is the great-circle (haversine)
+   distance between the two clusters' centroids (mean of available `lat/lon`). If
+   either cluster has no coordinates, it is `null` and omitted from the LLM's
+   reasoning.
+3. **Batch escalate `resolve_boundary`.** Pack all soft boundaries into one (or a
+   few) Claude API call(s). Each boundary payload:
    `{ left: {cities, dates, count}, right: {cities, dates, count}, gap_days,
-   approx_distance_km }`. Response per boundary:
+   approx_distance_km, triggers: [...] }`. Response per boundary:
    `{ decision: "merge" | "split", reason }`. Schema-invalid or no key →
-   fallback to the `TRIP_GAP_FALLBACK_DAYS` rule (gap `≥` → split, else merge).
-4. Apply merge/split verdicts to produce final trips.
+   fallback to the `TRIP_GAP_FALLBACK_DAYS` rule (`gap_days ≥` → split, else
+   merge; note this defaults small-gap country hops to *merge* unless the LLM
+   splits them).
+4. Apply hard splits + merge/split verdicts to produce final trips.
 
 ## 7. Naming (enrichment)
 
-Each final trip calls `name_trip`: payload `{ cities_in_order, date_range,
-count }`, response `{ title, confidence }`. Fallback title = `"<top city/cities>,
-<Mon Year>"` (multi-city → `"Lisbon & Porto"`). `ALBUM_PREFIX` is prepended in
-all cases, e.g. `Trip — Lisbon long weekend` or `Trip — Lisbon & Porto, Apr 2025`.
+Each final trip has a stable identity `trip_key` = the immutable Immich **asset
+id of its earliest asset** (see §9). `name_trip` is **cached by `trip_key`**, not
+by mutable trip contents — so adding photos to an existing trip later does **not**
+re-roll the title.
+
+`name_trip` payload `{ cities_in_order, date_range, count }`, response
+`{ title, confidence }`. Fallback title = `"<top city/cities>, <Mon Year>"`
+(multi-city → `"Lisbon & Porto"`). `ALBUM_PREFIX` is prepended in all cases, e.g.
+`Trip — Lisbon long weekend` or `Trip — Lisbon & Porto, Apr 2025`. The title is
+**display metadata only**; album identity is the `trip_key` marker, never the title.
 
 ## 8. Shared Escalation Seam
 
@@ -145,11 +186,16 @@ A single function:
 escalate(kind, payload, response_schema, fallback_fn) -> verdict
 ```
 
-Responsibilities: prompt assembly, Claude API call, schema validation, caching
-(hash of `payload`), audit logging, and fallback on any failure. Two call sites:
-`resolve_boundary` and `name_trip`. With no key or `--no-llm`, every call routes
-straight to `fallback_fn`, so the pipeline behaves as a pure deterministic
-version and remains idempotent.
+Responsibilities: prompt assembly, Claude API call, schema validation, caching,
+audit logging, and fallback on any failure. The caller supplies an explicit
+**cache key** so identity is decoupled from mutable content:
+- `resolve_boundary` keys on the boundary's stable endpoints (the two clusters'
+  earliest-asset ids), **not** on counts — so adding photos doesn't re-adjudicate.
+- `name_trip` keys on `trip_key` (§7).
+
+Two call sites: `resolve_boundary` and `name_trip`. With no key or `--no-llm`,
+every call routes straight to `fallback_fn`, so the pipeline behaves as a pure
+deterministic version and remains idempotent.
 
 ## 9. Apply (idempotent, dry-run by default)
 
@@ -160,18 +206,42 @@ fallback.
 
 With `--apply`:
 
-- **Albums** — `GET /api/albums` first; reuse an album whose name matches the
-  intended title **exactly** (full title including `ALBUM_PREFIX`), else
-  `POST /api/albums`. Add assets via `PUT /api/albums/{id}/assets`; Immich skips
-  assets already in the album, so re-adds are safe. Note: changing `ALBUM_PREFIX`
-  or an LLM-generated title between runs yields a new album rather than renaming
-  the old one — exact-match reuse is the predictable, least-surprising rule.
-- **Tag** — ensure `REVIEW_TAG` exists (`POST /api/tags`), then bulk-attach the
-  no-location assets via the tag-assets endpoint.
+- **Albums (identity by marker, not title).** Each trip has a stable `trip_key`
+  (earliest asset id). Every album this tool creates stores a machine marker in
+  its **description**: `[immich-trip-albummer] key=<trip_key>`. On apply:
+  `GET /api/albums`, parse markers, and index by `trip_key`.
+  - **Match found** → reuse that album. Add new assets via
+    `PUT /api/albums/{id}/assets` (Immich skips assets already present, so re-adds
+    are safe). If the freshly computed title differs, **`PATCH /api/albums/{id}`
+    to rename in place** — never create a second album.
+  - **No match** → `POST /api/albums` with the title and the marker description.
+  This makes re-runs idempotent under content growth: adding photos to a trip
+  updates the existing album rather than spawning a duplicate, because identity is
+  the `trip_key` marker, not the (mutable, possibly LLM-generated) title.
+- **Tag (rerun-safe).** `GET /api/tags`, exact-name (case-insensitive) lookup for
+  `REVIEW_TAG` → reuse its id; else `POST /api/tags`. Then bulk-attach the
+  review assets via `PUT /api/tags/assets` (`{ tagIds, assetIds }`). Re-attaching
+  an already-tagged asset is a no-op.
+
+### Idempotency limits (known, surfaced in the plan)
+
+`trip_key` = earliest-asset id is stable under the common case (incremental
+forward imports). Two cases are best-effort and explicitly reported in the
+dry-run plan rather than silently "handled":
+
+- **Earlier asset imported into an existing trip** (e.g. back-filling old photos)
+  can shift a trip's earliest asset, changing its `trip_key`. The plan flags any
+  trip whose `trip_key` has no matching album marker but which overlaps an
+  existing tool-made album, so the user can reconcile instead of getting a quiet
+  duplicate.
+- **Re-clustering merges/splits a previously albumed trip differently** (new data
+  changed a boundary verdict). The tool never deletes or rewrites old albums
+  (per §13); it reports the divergence (which existing album(s) the new trip
+  overlaps) and leaves reconciliation to the user.
 
 ## 10. Auditability
 
-`escalations.jsonl` records every escalation: `kind`, hashed input, full payload,
+`escalations.jsonl` records every escalation: `kind`, cache key, full payload,
 verdict, reason, and whether the verdict or the fallback was applied. This answers
 "why was this trip split / named this way?" after the fact.
 
@@ -184,26 +254,46 @@ verdict, reason, and whether the verdict or the fallback was applied. This answe
 
 ## 12. Testing
 
-- **Pure functions** (classification, first-pass clustering, ambiguous-band
-  detection, fallback naming) → unit-tested with fixture assets. No network, no
-  LLM.
+- **Pure functions** → unit-tested with fixture assets, no network/LLM:
+  - classification, incl. the four branches and the home-GPS radius edge (coords
+    inside radius = home, outside = away, no-home-coords = review);
+  - provisional-cut pass (cut at `≥ GAP_MIN` **or** country change; sub-`GAP_MIN`
+    same-country stays merged);
+  - boundary classification (hard-split vs soft/escalate), incl. a small-gap
+    country hop landing in the escalate set and an outlier triggering escalation;
+  - haversine/centroid distance, incl. `null` when coords absent;
+  - fallback naming and `trip_key` derivation.
 - **`escalate`** → injected fake adjudicator. Assert: a valid verdict is adopted;
-  an invalid verdict triggers the fallback; a cache hit does not re-invoke the
-  adjudicator.
+  an invalid verdict triggers the fallback; a repeated cache key does not
+  re-invoke the adjudicator; `--no-llm` always routes to fallback.
+- **Idempotency** → given recorded album/tag responses, assert: marker parsing
+  finds the right album by `trip_key`; a changed title triggers `PATCH` (not a new
+  album); growing a trip re-uses the album; the re-clustering/earlier-import edge
+  cases are reported in the plan rather than duplicating.
 - **API client** → thin layer exercised via the dry-run plan output against
-  recorded/fake responses.
+  recorded/fake responses pinned to the target API version.
 
 ## 13. Out of Scope (YAGNI)
 
 - No external reverse-geocoder — rely on Immich's stored geocoding.
-- No GPS-radius home zone — home is matched by city/state name.
+- Home is matched primarily by city/state name; GPS radius is an **optional,
+  narrow** fallback used *only* for coordinates-only assets (§5), not a general
+  home-zone mechanism.
 - No generalized escalation framework — only the single-file seam above.
-- No automatic album deletion or re-clustering of previously created albums.
+- No automatic album deletion or re-clustering of previously created albums (see
+  Idempotency limits in §9).
 
 ## 14. Assumptions / Version Risk
 
-Endpoints target a recent Immich API: `POST /api/search/metadata`,
-`GET/POST /api/albums`, `PUT /api/albums/{id}/assets`, `POST /api/tags` and the
-tag-assets bulk endpoint, with `exifInfo` carrying `city/state/country/
-dateTimeOriginal/latitude/longitude`. If the live instance differs, the client
-fails loudly so the mismatch is visible and fixable.
+Endpoints/fields below were **verified against the current Immich OpenAPI spec**
+(`open-api/immich-openapi-specs.json`): `POST /search/metadata` (singular `type`,
+`visibility`, `withDeleted`, `withStacked`, paginated `assets.items`/`nextPage`);
+`GET/POST /albums`, `PUT /albums/{id}/assets`, `PATCH /albums/{id}`; `GET/POST
+/tags`, `PUT /tags/assets` (`{tagIds, assetIds}`); API-key auth via `x-api-key`;
+`exifInfo` carrying `city/state/country/dateTimeOriginal/latitude/longitude`.
+
+Immich's published API docs are generated from this OpenAPI source on `main`,
+which moves. **Tests and the client must be pinned to the target server's API
+version**, not to `main`; the client fails loudly on any auth failure or
+unexpected response shape so a version drift is visible and fixable rather than
+silent.
