@@ -120,7 +120,12 @@ For each asset, evaluated in order:
    - If home coords are **not** configured: → queue for the `REVIEW_TAG` (do
      **not** assume away). This is the safe default that prevents un-geocoded home
      photos from becoming fake trip albums.
-4. **Away** — has a `city` (or `state`), not matching home → feed into clustering.
+4. **Away** — has a `city` (or `state`) not matching home (with or without coords)
+   → feed into clustering.
+
+The four branches form a complete partition: branch 1 = no location at all;
+branch 2 = name-matched home; branch 3 = coords but no name; branch 4 = named and
+not home. Every asset lands in exactly one.
 
 Rationale: a coordinates-only asset is genuinely located but cannot be name-matched
 against home, so without a GPS home reference it is ambiguous — routing it to
@@ -141,15 +146,25 @@ middle band" wording left middle-band gaps with no boundary to escalate).
    Sub-`GAP_MIN`, same-country gaps never become boundaries (these are the only
    "hard merges"). This yields provisional clusters and a list of provisional
    boundaries, each of which is then classified exactly once below.
-2. **Classify each provisional boundary:**
+2. **Classify each provisional boundary** (this step only *classifies* boundaries
+   placed in step 1 — it never creates new ones):
    - **Hard split** (no escalation) — `gap_days ≥ GAP_MAX_DAYS` **and** country is
      unchanged/`None`. Distinct trips beyond doubt.
-   - **Soft boundary → escalate** — everything else. This covers, by construction:
+   - **Soft boundary → escalate** — everything else. By construction this is
+     exactly two cases:
      - **Middle-band gap** — `GAP_MIN_DAYS ≤ gap_days < GAP_MAX_DAYS`;
      - **Country change** — a country hop, *including* one with a small gap (it
-       became a boundary in step 1, so it is reviewed rather than force-merged);
-     - **Sparse outlier** — either side has `≤ OUTLIER_MAX_ASSETS` assets
-       (default `2`), e.g. a layover or single drive-through shot.
+       became a boundary in step 1, so it is reviewed rather than force-merged).
+
+   **Sparse outlier is an annotation, not a trigger.** For each soft boundary, if
+   either adjacent cluster has `≤ OUTLIER_MAX_ASSETS` assets (default `2`), set an
+   `outlier` flag in the escalation payload as *context* for the LLM (e.g. "the
+   right side is a single layover shot — likely merge"). It does **not** create a
+   boundary (a sub-`GAP_MIN`, same-country single shot stays merged, which is the
+   desired behavior — one stray photo within a trip is part of that trip) and does
+   **not** override a hard split. It only enriches boundaries that are already
+   soft. (Chosen over a boundary-creating rule per YAGNI: a same-country photo
+   inside the merge window is virtually always part of the surrounding trip.)
 
    `approx_distance_km` for a soft boundary is the great-circle (haversine)
    distance between the two clusters' centroids (mean of available `lat/lon`). If
@@ -158,7 +173,9 @@ middle band" wording left middle-band gaps with no boundary to escalate).
 3. **Batch escalate `resolve_boundary`.** Pack all soft boundaries into one (or a
    few) Claude API call(s). Each boundary payload:
    `{ left: {cities, dates, count}, right: {cities, dates, count}, gap_days,
-   approx_distance_km, triggers: [...] }`. Response per boundary:
+   approx_distance_km, cause: "middle_band" | "country_change", outlier: bool }`.
+   (`cause` is which step-1 rule placed the boundary; `outlier` is the annotation
+   from step 2.) Response per boundary:
    `{ decision: "merge" | "split", reason }`. Schema-invalid or no key →
    fallback to the `TRIP_GAP_FALLBACK_DAYS` rule (`gap_days ≥` → split, else
    merge; note this defaults small-gap country hops to *merge* unless the LLM
@@ -260,7 +277,8 @@ verdict, reason, and whether the verdict or the fallback was applied. This answe
   - provisional-cut pass (cut at `≥ GAP_MIN` **or** country change; sub-`GAP_MIN`
     same-country stays merged);
   - boundary classification (hard-split vs soft/escalate), incl. a small-gap
-    country hop landing in the escalate set and an outlier triggering escalation;
+    country hop landing in the escalate set, and that a sub-`GAP_MIN` same-country
+    single shot creates **no** boundary (outlier is annotation only, never a cut);
   - haversine/centroid distance, incl. `null` when coords absent;
   - fallback naming and `trip_key` derivation.
 - **`escalate`** → injected fake adjudicator. Assert: a valid verdict is adopted;
