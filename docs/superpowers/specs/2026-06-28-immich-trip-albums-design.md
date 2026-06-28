@@ -134,8 +134,9 @@ For each asset, evaluated in order:
    → feed into clustering.
 
 The four branches form a complete partition: branch 1 = no location at all;
-branch 2 = name-matched home; branch 3 = coords but no name; branch 4 = named and
-not home. Every asset lands in exactly one.
+branch 2 = name-matched home **that also passes the country guard**; branch 3 =
+coords but no name; branch 4 = named and not home (this includes a name match that
+*fails* the country guard, e.g. `Paris, Texas`). Every asset lands in exactly one.
 
 Rationale: a coordinates-only asset is genuinely located but cannot be name-matched
 against home, so without a GPS home reference it is ambiguous — routing it to
