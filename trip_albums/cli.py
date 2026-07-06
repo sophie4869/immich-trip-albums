@@ -44,8 +44,8 @@ def _parse_window(since, until, gap_max_days):
     since_dt = _parse_day(since, end_of_day=False) if since else None
     until_dt = _parse_day(until, end_of_day=True) if until else None
     buffer = timedelta(days=gap_max_days)
-    fetch_after = (since_dt - buffer).isoformat() if since_dt else None
-    fetch_before = (until_dt + buffer).isoformat() if until_dt else None
+    fetch_after = (since_dt - buffer).strftime("%Y-%m-%dT%H:%M:%SZ") if since_dt else None
+    fetch_before = (until_dt + buffer).strftime("%Y-%m-%dT%H:%M:%SZ") if until_dt else None
     return (since_dt, until_dt), fetch_after, fetch_before
 
 
