@@ -2,7 +2,9 @@
 
 Scans an [Immich](https://immich.app) library, finds photos and videos taken
 **away from home**, clusters them into **trips**, and creates **one album per
-trip**. Screenshots and assets without any location data are silently skipped.
+trip**. Screenshots and assets without any location data are skipped from albums
+(though the plan flags the no-location ones that fall inside a trip's dates, so
+you can review them — see [Photos without location data](#photos-without-location-data)).
 **Dry-run by default**, idempotent on re-runs.
 
 ## How it works
@@ -129,11 +131,28 @@ with at least one photo inside the window are albumed.
   previously-albumed trip differently. The tool never deletes or rewrites albums
   it made; reconcile those manually.
 
+## Photos without location data
+
+Immich can't place a photo that has neither GPS coordinates nor a
+reverse-geocoded city — many screenshots, scans, and some camera/app imports fall
+here. These are **skipped from trip albums by default**, and the CLI itself never
+touches them; it only *reports* how many fall **within a new trip's date window**
+(`no-location photos near a trip: N`), because those are often genuine trip
+photos (a phone shot with location services off, a scanned ticket, a WhatsApp
+image from a travel companion).
+
+Acting on them is an **optional, manual review step** — easiest to drive through
+an AI agent (see the section above). The typical flow: for each trip, create a
+throwaway **review album** holding that trip's no-location photos, eyeball them,
+drag the keepers into the real trip album, then delete the review album. This
+keeps the automatic albums GPS-clean while still giving you a quick pass over the
+ambiguous ones. Nothing here happens unless you ask for it.
+
 ## Screenshot filtering
 
 Assets whose `originalPath` contains `screenshot`, `screen shot`, `screen_shot`,
 or `screens/` and have no location data are automatically skipped and not counted
-toward trips.
+toward trips (they don't show up in the no-location review count either).
 
 ## Immich API version
 
