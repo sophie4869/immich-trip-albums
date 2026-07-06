@@ -87,6 +87,26 @@ trip-albums --env .env --since 2025-06-01 --apply    # e.g. nightly "new photos"
 trip-albums --env .env --since 2025-04-01 --until 2025-04-30
 ```
 
+## Driving it with an AI agent
+
+The CLI is deliberately deterministic — it never calls an LLM — so it's safe to
+run unattended. But it also pairs well with an AI coding agent
+([Claude Code](https://www.claude.com/product/claude-code) and similar) as a
+human-in-the-loop front end. The agent runs the dry run, reads the plan back to
+you in plain language, proposes **better trip names** (e.g. *Côte d'Azur, May
+2024* instead of the mechanical *Cassis & Marseille 02, May 2024*), sanity-checks
+the merge/split boundary decisions, and only applies once you approve.
+
+Because album identity is the description marker rather than the title (see
+[Idempotency notes](#idempotency-notes)), the agent can rename albums freely and
+re-runs stay correct.
+
+Nothing special is required — just tell your agent to *"run the trip-albums dry
+run and suggest better names before applying."* The typical loop is: dry run →
+agent narrates the plan and proposes names/boundary tweaks → you approve →
+`--apply`. If you use [Claude Code](https://www.claude.com/product/claude-code),
+you can wrap exactly this loop in a project skill so it's one command.
+
 `--since` / `--until` filter **server-side** (`takenAfter`/`takenBefore`), so a
 big library isn't fetched whole. A `GAP_MAX_DAYS` buffer is fetched on each side
 of the window so a trip straddling an edge still clusters correctly; only trips
