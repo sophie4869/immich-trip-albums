@@ -42,13 +42,17 @@ pip install -e ".[dev]"
 
 ## Configure
 
-Use the interactive setup script to generate a `.env` file:
+The quickest path is the interactive setup script. It prompts you for your Immich
+URL and API key, your home city/region, and the trip-clustering thresholds (with
+sensible defaults), prints the exact API-key permissions to grant, and writes a
+ready-to-use `.env`:
 
 ```bash
-bash setup-env.sh
+bash setup-env.sh          # writes .env (or: bash setup-env.sh path/to/.env)
 ```
 
-Or copy `.env.example` and fill it in manually:
+Prefer to do it by hand? Copy the template and fill it in — every key is
+documented in the table below:
 
 ```bash
 cp .env.example .env
