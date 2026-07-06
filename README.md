@@ -94,8 +94,13 @@ with at least one photo inside the window are albumed.
 
 ## Idempotency notes
 
-- Album identity is the description marker, **not** the title — re-runs add new
-  photos to the existing album and rename it in place if the title changed.
+- Album identity is the description marker, **not** the title — so you can
+  **rename an album freely in Immich** and re-runs still recognize it and leave
+  your name untouched (already-albumed trips are detected by marker and skipped).
+- Auto-generated names are just `City1 & City2, Mon Year`. Rename in the Immich
+  UI whenever you like, or — if you drive this tool through the `trip-albums`
+  Claude skill — ask the agent to suggest better trip names (e.g. *Côte d'Azur*
+  instead of *Cassis & Marseille 02*) before or after creating albums.
 - Two best-effort cases are **reported in the plan** rather than silently
   duplicated: back-filling an *earlier* photo into an existing trip (which shifts
   the trip's earliest-asset key), and re-clustering that merges/splits a
